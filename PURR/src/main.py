@@ -29,7 +29,10 @@ try:
 except Exception:
     pass
 
-from src.tile import Tile
+try:
+    from tile import Tile
+except ImportError:
+    from src.tile import Tile
 
 # --- Configurações ---
 SCREEN_WIDTH = 800
@@ -123,16 +126,17 @@ def iso_to_cart(iso_x, iso_y):
     return math.floor(x), math.floor(y)
 
 def get_tile_height(tile):
-    if tile.structure == 'Clay':
-        # Reflete o empilhamento da argila (5px por item)
-        return (tile.base_amount * 5) + (tile.amount * 5)
-    elif tile.structure == 'Wall':
-        # Reflete o empilhamento das paredes (30px por cubo)
-        return (tile.base_amount * 30) + (tile.amount * 30)
-    elif tile.structure == 'Tree':
-        # Árvores agora têm colisão (altura de 60px)
-        return 60
-    return 0
+    max_h = 0
+    for p in tile.piles:
+        h = 0
+        if p['structure'] == 'Clay':
+            h = (p['base_amount'] * 5) + (p['amount'] * 5)
+        elif p['structure'] == 'Wall':
+            h = (p['base_amount'] * 30) + (p['amount'] * 30)
+        elif p['structure'] == 'Tree':
+            h = (p['base_amount'] * 30) + 60
+        if h > max_h: max_h = h
+    return max_h
 
 # --- Inventory Helpers ---
 def inv_count(inventory, name):
@@ -291,6 +295,13 @@ def main():
 
         cat_sitting = load_cat_sprite('Gray Cat FRONT.png')
         cat_sitting = pygame.transform.scale(cat_sitting, (50, 50))
+
+        # Ícone para o Minimapa
+        try:
+            cat_minimap_icon = load_cat_sprite('ICON.png')
+            cat_minimap_icon = pygame.transform.scale(cat_minimap_icon, (16, 16))
+        except Exception:
+            cat_minimap_icon = None
         
         # Default fallback idle is now FrontStanding
         try:
@@ -405,6 +416,7 @@ def main():
         cat_idle = s
         cat_move = s
         cat_left = s
+        cat_minimap_icon = pygame.transform.scale(s, (10, 10))
         frames_right = [s, s]
         frames_left = [s, s]
         frames_up_left = [s, s]
@@ -472,13 +484,39 @@ def main():
         except Exception as e:
             print(f"Erro ao carregar clay wall: {e}")
 
-        # Carregar Árvore
+        # Carregar Árvore e Estágios de Crescimento
+        tree_growth_imgs = []
         try:
-            tree_full = load_env_sprite(['assets', 'environment', 'tree1.png'])
+            # tree1.png é a árvore padrão madura
+            tree_full = load_env_sprite(['assets', 'environment', 'tree4.png'])
             tree_img = pygame.transform.scale(tree_full, (60, 80))
-            print("tree1.png carregado.")
+            
+            for i in range(5):
+                t_path = os.path.join(base_dir, 'assets', 'environment', f'tree{i}.png')
+                if os.path.exists(t_path):
+                    img = pygame.image.load(t_path).convert_alpha()
+                    img = pygame.transform.scale(img, (60, 80))
+                    tree_growth_imgs.append(img)
+                else:
+                    tree_growth_imgs.append(tree_img)
+            print("Estágios de crescimento da árvore carregados.")
         except Exception as e:
-            print(f"Erro ao carregar árvore: {e}")
+            print(f"Erro ao carregar árvore/estágios: {e}")
+            tree_img = None
+
+        # Carregar Log
+        try:
+            log_full = load_env_sprite(['assets', 'environment', 'Log.png'])
+            log_img = pygame.transform.scale(log_full, (45, 30))
+            print("Log.png carregado.")
+            
+            log_stack_full = load_env_sprite(['assets', 'environment', 'LogStack.png'])
+            log_stack_img = pygame.transform.scale(log_stack_full, (50, 40))
+            print("LogStack.png carregado.")
+        except Exception as e:
+            print(f"Erro ao carregar Log/LogStack: {e}")
+            log_img = None
+            log_stack_img = None
 
         # Carregar Areia
         try:
@@ -535,6 +573,10 @@ def main():
         print(f"Aviso: JUMP.png erro ({e}).")
         cat_jump_frames = [cat_move]
 
+    # --- Constantes de Controle ---
+    last_click_time = 0
+    double_click_threshold = 300 # ms
+    
     # --- Variáveis de Jogo ---
     anim_frame = 0
     anim_timer = 0
@@ -550,7 +592,6 @@ def main():
     # Rest State
     is_resting = False
     
-    placing_rock_mode = False
     
     # Drag and Drop State
     dragging_item = None # Name of the item being dragged (e.g., 'Wood', 'Clay')
@@ -607,18 +648,23 @@ def main():
         
         if cat == "STRUCTURE":
             if selection == "Wall":
-                if tile.structure == "Wall":
-                    if not is_continuous: # Só stacka no clique inicial
-                        tile.amount += 1
-                else:
-                    tile.structure = "Wall"
-                    tile.amount = 1
+                # No editor, sempre coloca na base ou aumenta a pilha existente na base
+                found_base_wall = False
+                for p in tile.piles:
+                    if p['structure'] == 'Wall' and p['base_amount'] == 0:
+                        if not is_continuous:
+                            p['amount'] += 1
+                        found_base_wall = True
+                        break
+                if not found_base_wall:
+                    tile.add_structure("Wall", 1, 0)
             elif selection == "Clay":
-                tile.structure = "Clay"
-                tile.amount = 10 
+                tile.add_structure("Clay", 10, 0)
             else:
-                tile.structure = selection
-                tile.amount = 1
+                if selection is not None:
+                    tile.add_structure(selection, 1, 0)
+                else:
+                    tile.piles = [] # Clear
         elif cat == "TERRAIN":
             tile.ground_type = selection
         elif cat == "SPAWNER":
@@ -703,31 +749,27 @@ def main():
                      inventory = loaded_inv
 
                 # Load Map State
-                map_structures = data.get('map_structures', [])
-                map_amounts = data.get('map_amounts', [])
+                map_piles = data.get('map_piles', [])
                 map_ground = data.get('map_ground', [])
-                
-                if map_structures:
-                     for r, row in enumerate(map_structures):
+                if map_piles:
+                    for r, row in enumerate(map_piles):
                          if r < len(level_map):
-                             for c, struct_data in enumerate(row):
+                             for c, pile_data in enumerate(row):
                                  if c < len(level_map[r]):
-                                     level_map[r][c].structure = struct_data
-                
-                if map_amounts:
-                     for r, row in enumerate(map_amounts):
-                         if r < len(level_map):
-                             for c, amt in enumerate(row):
-                                 if c < len(level_map[r]):
-                                     level_map[r][c].amount = amt
-
-                map_bases = data.get('map_bases', [])
-                if map_bases:
-                     for r, row in enumerate(map_bases):
-                         if r < len(level_map):
-                             for c, base in enumerate(row):
-                                 if c < len(level_map[r]):
-                                     level_map[r][c].base_amount = base
+                                     level_map[r][c].piles = pile_data
+                else:
+                    # Legacy Fallback
+                    map_structures = data.get('map_structures', [])
+                    map_amounts = data.get('map_amounts', [])
+                    map_bases = data.get('map_bases', [])
+                    if map_structures:
+                        for r, row in enumerate(map_structures):
+                            if r < len(level_map):
+                                for c, struct in enumerate(row):
+                                    if c < len(level_map[r]) and struct:
+                                        amt = map_amounts[r][c] if (r < len(map_amounts) and c < len(map_amounts[r])) else 1
+                                        base = map_bases[r][c] if (r < len(map_bases) and c < len(map_bases[r])) else 0
+                                        level_map[r][c].add_structure(struct, amt, base)
 
                 if map_ground:
                      for r, row in enumerate(map_ground):
@@ -750,7 +792,23 @@ def main():
                 if stone_count > 0:
                      inv_add(inventory, 'Clay', stone_count)
                      inv_remove(inventory, 'Stone', stone_count)
-                    
+
+                # Migration: Wood -> Log (Inventory) - REMOVIDO POR PEDIDO DO USUÁRIO
+                # O usuário quer deletar as logs da bag que estão crashando
+                inventory = [item for item in inventory if item['name'] not in ['Log', 'Wood']]
+                
+                # Cleanup Malformed Piles (Map)
+                for r_idx, row in enumerate(level_map):
+                    for c_idx, tile in enumerate(row):
+                        valid_piles = []
+                        for p in tile.piles:
+                            if isinstance(p, dict) and 'structure' in p:
+                                # Garante que campos básicos existem
+                                p['amount'] = p.get('amount', 1)
+                                p['base_amount'] = p.get('base_amount', 0)
+                                valid_piles.append(p)
+                        tile.piles = valid_piles
+
                 print(f"Jogo carregado! Posição: {player_x}, {player_y}")
         except Exception as e:
             print(f"Erro ao carregar save: {e}")
@@ -795,46 +853,43 @@ def main():
         # --- Resource Respawn Check ---
         now = time.time()
         for res in respawning_resources:
-            if now >= res.get('respawn_time', 0):
-                rx, ry = res['x'], res['y']
-                if 0 <= ry < len(level_map) and 0 <= rx < len(level_map[0]):
-                    tile = level_map[ry][rx]
+            rx, ry = res['x'], res['y']
+            if 0 <= ry < len(level_map) and 0 <= rx < len(level_map[0]):
+                tile = level_map[ry][rx]
+                
+                # Se for Tree, ela cresce visualmente antes de se tornar colhível
+                if res['structure'] == 'Tree':
                     if tile.structure is None:
-                        tile.structure = res['structure']
-                        if tile.structure == 'Clay': tile.amount = 10
-                        # Deixamos o respawn_time no passado para que ele tente spawnar 
-                        # toda vez que o tile ficar vazio.
+                        # Se já passou do tempo de respawn, vira árvore colhível (Stage 4)
+                        if now >= res.get('respawn_time', 0):
+                            tile.add_structure('Tree', 1, 0)
+                else:
+                    # Outros recursos (Clay) spawnão instantaneamente no final do timer
+                    if now >= res.get('respawn_time', 0):
+                        if tile.structure is None:
+                            tile.structure = res['structure']
+                            if tile.structure == 'Clay': tile.amount = 10
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 # SAVE GAME
                 # Serialize Map
-                map_structures = []
-                map_amounts = []
-                map_bases = []
+                map_piles = []
                 map_ground = []
                 for row in level_map:
-                    map_row = []
-                    amt_row = []
-                    base_row = []
+                    piles_row = []
                     gr_row = []
                     for tile in row:
-                        map_row.append(tile.structure)
-                        amt_row.append(tile.amount)
-                        base_row.append(tile.base_amount)
+                        piles_row.append(tile.piles)
                         gr_row.append(tile.ground_type)
-                    map_structures.append(map_row)
-                    map_amounts.append(amt_row)
-                    map_bases.append(base_row)
+                    map_piles.append(piles_row)
                     map_ground.append(gr_row)
 
                 save_data = {
                     'player_x': player_x, 
                     'player_y': player_y,
                     'inventory': inventory,
-                    'map_structures': map_structures,
-                    'map_amounts': map_amounts,
-                    'map_bases': map_bases,
+                    'map_piles': map_piles,
                     'map_ground': map_ground,
                     'respawning_resources': respawning_resources
                 }
@@ -902,55 +957,44 @@ def main():
                     
                     if 0 <= target_y < len(level_map) and 0 <= target_x < len(level_map[0]):
                         target_tile = level_map[target_y][target_x]
-                        if target_tile.structure == 'Tree':
-                            target_tile.structure = None
-                            inv_add(inventory, 'Wood', 1)
+                        # New Pile-based Gather Logic
+                        harvested = False
+                        target_idx = -1
+                        for i, p in enumerate(target_tile.piles):
+                            if p['structure'] in ['Tree', 'Clay']:
+                                target_idx = i
+                                break
+                        
+                        if target_idx != -1:
+                            pile = target_tile.piles.pop(target_idx)
+                            p_type = pile['structure']
+                            p_amt = pile['amount']
                             
-                            # Update Existing Spawner if found
-                            found_spawner = False
-                            for spw in respawning_resources:
-                                if spw['x'] == target_x and spw['y'] == target_y:
-                                    spw['respawn_time'] = time.time() + spw.get('respawn_delay', 120)
-                                    found_spawner = True
-                                    break
+                            # Aciona Spawner
+                            spw = next((r for r in respawning_resources if r['x'] == target_x and r['y'] == target_y), None)
+                            if spw and spw['structure'] == p_type:
+                                spw['respawn_time'] = time.time() + spw.get('respawn_delay', 120)
                             
-                            if not found_spawner:
-                                # Fallback para itens que não vieram de spawners (compatibilidade)
-                                respawning_resources.append({
-                                    'x': target_x, 
-                                    'y': target_y, 
-                                    'structure': 'Tree', 
-                                    'respawn_time': time.time() + 120,
-                                    'respawn_delay': 120
-                                })
+                            if p_type == 'Tree':
+                                # Drop Log on ground
+                                drop_x, drop_y = target_x, target_y
+                                # Tenta vizinho se o atual estiver cheio (embora acabe de esvaziar a árvore)
+                                neighbors = [(target_x+1, target_y), (target_x-1, target_y), (target_x, target_y+1), (target_x, target_y-1)]
+                                random.shuffle(neighbors)
+                                for nx, ny in neighbors:
+                                    if 0 <= ny < len(level_map) and 0 <= nx < len(level_map[0]):
+                                        if level_map[ny][nx].is_walkable():
+                                            drop_x, drop_y = nx, ny
+                                            break
+                                level_map[drop_y][drop_x].add_structure('Log', 1, 0)
+                                show_message("Tree harvested! Log dropped.")
+                            elif p_type == 'Clay':
+                                inv_add(inventory, 'Clay', p_amt)
+                                show_message(f"Clay +{p_amt}")
                             
-                            show_message("Wood +1")
-                            print("Coletou Madeira!")
-                        elif target_tile.structure == 'Clay':
-                            amount = target_tile.amount
-                            target_tile.structure = None
-                            target_tile.amount = 1 # Reset
-                            inv_add(inventory, 'Clay', amount)
+                            harvested = True
+                            target_tile.piles.sort(key=lambda x: x['base_amount'])
                             
-                            # Update Existing Spawner if found
-                            found_spawner = False
-                            for spw in respawning_resources:
-                                if spw['x'] == target_x and spw['y'] == target_y:
-                                    spw['respawn_time'] = time.time() + spw.get('respawn_delay', RESPAWN_DELAY_CLAY)
-                                    found_spawner = True
-                                    break
-
-                            if not found_spawner:
-                                respawning_resources.append({
-                                    'x': target_x, 
-                                    'y': target_y, 
-                                    'structure': 'Clay', 
-                                    'respawn_time': time.time() + RESPAWN_DELAY_CLAY,
-                                    'respawn_delay': RESPAWN_DELAY_CLAY
-                                })
-                            
-                            show_message(f"Clay +{amount}")
-                            print(f"Coletou {amount} Argilas!")
                         else:
                             show_message("Nothing here...")
 
@@ -1022,17 +1066,6 @@ def main():
                      else:
                         show_message("Need 2 Wood!")
 
-                if event.key == pygame.K_r: # Toggle Rock Placement Mode
-                    if inv_count(inventory, 'Clay') > 0:
-                        placing_rock_mode = not placing_rock_mode
-                        if placing_rock_mode:
-                            show_message("Clay Placement Mode: ON")
-                            print("Modo construção ativado: Clique para colocar.")
-                        else:
-                            show_message("Clay Placement Mode: OFF")
-                    else:
-                        show_message("No clay!")
-                        placing_rock_mode = False
 
             if event.type == pygame.MOUSEWHEEL:
                 if dragging_item:
@@ -1063,6 +1096,8 @@ def main():
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = pygame.mouse.get_pos()
+                is_double_click = (pygame.time.get_ticks() - last_click_time < double_click_threshold)
+                last_click_time = pygame.time.get_ticks()
                 
                 # --- Lógica do Editor ---
                 if game_mode == "EDITOR":
@@ -1191,81 +1226,102 @@ def main():
                             best_p = -1
                             found_pick = False
                             
-                            # Verifica um raio ao redor para ver se o mouse colide com a caixa visual de algo
-                            # Isso permite clicar em coisas no alto
                             for ry in range(max(0, player_y-6), min(len(level_map), player_y+7)):
                                 for rx in range(max(0, player_x-6), min(len(level_map[0]), player_x+7)):
                                     t = level_map[ry][rx]
-                                    if t.structure:
+                                    for pile_idx, p in enumerate(t.piles):
                                         ix, iy = cart_to_iso(rx, ry)
                                         dx, dy = ix + offset_x, iy + offset_y
-                                        h_val = 60 if t.structure == 'Tree' else (t.amount * 30 if t.structure == 'Wall' else 20)
-                                        b_val = t.base_amount * 30 if t.structure == 'Wall' else 0
+                                        
+                                        h_unit = 30 if p['structure'] == 'Wall' else (5 if p['structure'] == 'Clay' else 60)
+                                        h_val = p['amount'] * h_unit
+                                        b_val = p['base_amount'] * h_unit
                                         
                                         # Caixa de colisão visual (3D)
                                         box_rect = pygame.Rect(dx - 30, dy - 30 - b_val - (h_val-30), 60, h_val)
                                         if box_rect.collidepoint(mx, my):
-                                            p = ry + rx + (b_val * 0.01)
-                                            if p > best_p:
-                                                best_p = p
+                                            priority = ry + rx + (b_val * 0.001)
+                                            if priority > best_p:
+                                                best_p = priority
                                                 grid_x, grid_y = rx, ry
+                                                target_pile_idx = pile_idx
+                                                # Determina qual bloco específico foi clicado
+                                                clicked_h = (dy + 15 - my) / h_unit
+                                                target_block_in_pile = int(clicked_h - p['base_amount'])
                                                 found_pick = True
 
                             if found_pick:
                                 tile = level_map[grid_y][grid_x]
-                                if tile.structure in ['Clay', 'Wall']:
-                                    dragging_item = tile.structure
-                                    dragging_source_tile = (grid_x, grid_y)
-                                    dragging_source_inv_item = None
-                                    
-                                    # Pegar 1 unidade
-                                    dragging_amount = 1
-                                    dragging_max_amount = tile.amount
-                                    dragging_base_amount = tile.base_amount
-                             
-                                    # Se for Wall, remove a unidade daquela posição (que agora é sempre 1)
-                                    if tile.structure == 'Wall':
-                                        tile.structure = None
-                                        tile.amount = 0
-                                        tile.base_amount = 0
-                                    else:
-                                        # Se for Clay, remove 1 da pilha
-                                        tile.amount -= 1
-                                        if tile.amount <= 0:
-                                            tile.structure = None
-                                    
-                                    dragging_offset = (0, 0)
-                                    show_message(f"Picked up {dragging_item}")
-                            else:
-                                # Fallback final: Ground plane
-                                grid_x, grid_y = iso_to_cart(adj_mx, adj_my)
-                                if 0 <= grid_y < len(level_map) and 0 <= grid_x < len(level_map[0]):
-                                    tile = level_map[grid_y][grid_x]
-                                    show_message(f"Picked up {dragging_item}")
+                                # Usa a pilha específica identificada no clique
+                                pile = tile.piles[target_pile_idx]
+                                
+                                dragging_item = pile['structure']
+                                dragging_source_tile = (grid_x, grid_y)
+                                dragging_source_inv_item = None
+                                dragging_amount = 1
+                                dragging_max_amount = pile['amount']
+                                # Altura absoluta do bloco no mundo
+                                dragging_base_amount = pile['base_amount'] + target_block_in_pile
+                                
+                                # Lógica de Divisão (Mantém os outros blocos)
+                                old_pile = tile.piles.pop(target_pile_idx)
+                                
+                                # Parte de baixo (se houver)
+                                if target_block_in_pile > 0:
+                                    tile.piles.append({
+                                        'structure': old_pile['structure'],
+                                        'amount': target_block_in_pile,
+                                        'base_amount': old_pile['base_amount']
+                                    })
+                                # Parte de cima (se houver)
+                                if target_block_in_pile < old_pile['amount'] - 1:
+                                    tile.piles.append({
+                                        'structure': old_pile['structure'],
+                                        'amount': old_pile['amount'] - target_block_in_pile - 1,
+                                        'base_amount': old_pile['base_amount'] + target_block_in_pile + 1
+                                    })
+                                
+                                tile.piles.sort(key=lambda x: x['base_amount'])
+                                
+                                # Aciona o Spawner para renascer (Regrowth) se houver um spawner aqui
+                                spawner = next((r for r in respawning_resources if r['x'] == grid_x and r['y'] == grid_y), None)
+                                if spawner and dragging_item == spawner['structure']:
+                                    spawner['respawn_time'] = time.time() + spawner['respawn_delay']
 
-                if not clicked_slot and placing_rock_mode and inv_count(inventory, 'Clay') > 0 and not dragging_item:
-                    # Logic for old R-Mode
-                    adj_mx = mx - offset_x
-                    adj_my = my - offset_y
-                    grid_x, grid_y = iso_to_cart(adj_mx, adj_my)
-                    dist_x = abs(grid_x - player_x)
-                    dist_y = abs(grid_y - player_y)
-                    
-                    if dist_x <= 2 and dist_y <= 2:
-                        if 0 <= grid_y < len(level_map) and 0 <= grid_x < len(level_map[0]):
-                             target_tile = level_map[grid_y][grid_x]
-                             if target_tile.structure is None:
-                                 target_tile.structure = 'Clay'
-                                 inv_remove(inventory, 'Clay', 1)
-                                 show_message("Clay Placed!")
-                                 if inv_count(inventory, 'Clay') <= 0:
-                                     placing_rock_mode = False
-                             else:
-                                 show_message("Spot occupied!")
-                        else:
-                             show_message("Out of bounds!")
-                    else:
-                        show_message("Too far!")
+                                # Se for Double Click, vai direto para a bag
+                                if is_double_click:
+                                    item_to_add = dragging_item
+                                    if dragging_item == 'Tree': item_to_add = 'Log'
+                                    inv_add(inventory, item_to_add, dragging_amount)
+                                    show_message(f"Collected {item_to_add}")
+                                    dragging_item = None
+                                    dragging_amount = 0
+                                    found_pick = False 
+                                    break
+                                
+                                if dragging_item == 'Tree':
+                                    # No lugar de ir para a mão, "pula" no chão como Log
+                                    # Encontra um vizinho vazio ou o próprio tile se couber
+                                    target_x, target_y = grid_x, grid_y
+                                    neighbors = [(grid_x+1, grid_y), (grid_x-1, grid_y), (grid_x, grid_y+1), (grid_x, grid_y-1)]
+                                    random.shuffle(neighbors)
+                                    for nx, ny in neighbors:
+                                        if 0 <= ny < len(level_map) and 0 <= nx < len(level_map[0]):
+                                            ntile = level_map[ny][nx]
+                                            if ntile.is_walkable(): # Vizinho vazio/caminhável
+                                                target_x, target_y = nx, ny
+                                                break
+                                    
+                                    level_map[target_y][target_x].add_structure('Log', 1, 0)
+                                    show_message("Tree harvested! Log spawned on ground.")
+                                    
+                                    # Reseta o dragging pois o item "pulou"
+                                    dragging_item = None
+                                    dragging_amount = 0
+                                    dragging_source_tile = None
+                                else:
+                                    dragging_offset = (-22, -15) # Center Log on mouse
+                                    show_message(f"Picked up {dragging_item}")
 
 
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1: # Left Release
@@ -1384,45 +1440,13 @@ def main():
                         target_tile = level_map[grid_y][grid_x]
                         
                         if dragging_item == 'Wall':
-                            if target_tile.structure is None:
-                                # Smart Snap / Plane-Based Calculation
-                                desired_base = dragging_base_amount # Tenta preservar a altura original
-                                
-                                # Procura vizinhos para snap
-                                neighbors = [(grid_x+1, grid_y), (grid_x-1, grid_y), (grid_x, grid_y+1), (grid_x, grid_y-1)]
-                                found_neighbor = False
-                                for nx, ny in neighbors:
-                                    if 0 <= ny < len(level_map) and 0 <= nx < len(level_map[0]):
-                                        ntile = level_map[ny][nx]
-                                        if ntile.structure == 'Wall':
-                                            desired_base = ntile.base_amount
-                                            found_neighbor = True
-                                            break
-                                
-                                if not found_neighbor:
-                                    # Procura raio 1 (diagonais)
-                                    for dy in [-1, 0, 1]:
-                                        for dx in [-1, 0, 1]:
-                                            if dx == 0 and dy == 0: continue
-                                            nx, ny = grid_x + dx, grid_y + dy
-                                            if 0 <= ny < len(level_map) and 0 <= nx < len(level_map[0]):
-                                                ntile = level_map[ny][nx]
-                                                if ntile.structure == 'Wall':
-                                                    desired_base = ntile.base_amount
-                                                    found_neighbor = True
-                                                    break
-                                        if found_neighbor: break
-                                
-                                # Backup: Snap to player height if inventory drag
-                                if not found_neighbor and dragging_source_tile is None:
-                                    desired_base = int(z_offset // 30)
-
-                                # Coloca a parede
-                                target_tile.structure = 'Wall'
-                                target_tile.base_amount = desired_base
-                                target_tile.amount = 1 # Apenas empilhável, não stackável
-                                
-                                # Remove 1 do inventário se aplicável
+                            # Determina a altura desejada
+                            desired_base = dragging_base_amount
+                            if dragging_source_tile is None:
+                                desired_base = int(z_offset // 30)
+                            
+                            # Tenta colocar (add_structure agora retorna False se houver colisão de tipos)
+                            if target_tile.add_structure('Wall', 1, desired_base):
                                 if dragging_source_inv_item:
                                      dragging_source_inv_item['count'] -= 1
                                      if dragging_source_inv_item['count'] <= 0:
@@ -1431,83 +1455,39 @@ def main():
                                 
                                 show_message(f"Wall placed at H{desired_base}")
                                 placed = True
-                            elif target_tile.structure == 'Wall':
-                                # Empilhamento Vertical via Drag-and-Drop
-                                target_tile.amount += 1
-                                if dragging_source_inv_item:
-                                     dragging_source_inv_item['count'] -= 1
-                                     if dragging_source_inv_item['count'] <= 0:
-                                          if dragging_source_inv_item in inventory:
-                                               inventory.remove(dragging_source_inv_item)
-                                show_message(f"Wall stacked! Height: {target_tile.amount}")
-                                placed = True
                             else:
-                                show_message("Spot Occupied")
-                        elif dragging_item == 'Clay':
-                            if target_tile.structure is None:
-                                # Place
-                                target_tile.structure = 'Clay'
-                                target_tile.amount = dragging_amount
-                                
-                                # If source was inventory, deduct
-                                if dragging_source_inv_item:
-                                     dragging_source_inv_item['count'] -= dragging_amount
-                                     if dragging_source_inv_item['count'] <= 0:
-                                          # Remove from inventory
-                                          if dragging_source_inv_item in inventory:
-                                              inventory.remove(dragging_source_inv_item)
-                                
-                                show_message("Clay Placed!")
-                                placed = True
-                            elif target_tile.structure == 'Clay':
-                                # Stack
-                                target_tile.amount += dragging_amount
+                                show_message("Spot Occupied!")
+                        else:
+                            # Unified Placement using add_structure with collision check
+                            target_structure = dragging_item
+                            if dragging_item == 'Wood': target_structure = 'Tree'
+                            
+                            h_level = dragging_base_amount
+                            if dragging_source_tile is None:
+                                h_level = int(z_offset // 30)
+                            
+                            if target_tile.add_structure(target_structure, dragging_amount, h_level):
                                 if dragging_source_inv_item:
                                      dragging_source_inv_item['count'] -= dragging_amount
                                      if dragging_source_inv_item['count'] <= 0:
                                           if dragging_source_inv_item in inventory:
-                                              inventory.remove(dragging_source_inv_item)
-                                show_message(f"Stacked! Total: {target_tile.amount}")
+                                               inventory.remove(dragging_source_inv_item)
+                                show_message(f"{target_structure} placed at H{h_level}")
                                 placed = True
                             else:
-                                show_message("Spot Occupied")
-                        elif dragging_item == 'Wood':
-                             if target_tile.structure is None:
-                                 target_tile.structure = 'Tree' 
-                                 if dragging_source_inv_item:
-                                     dragging_source_inv_item['count'] -= 1
-                                     if dragging_source_inv_item['count'] <= 0:
-                                          if dragging_source_inv_item in inventory:
-                                               inventory.remove(dragging_source_inv_item)
-                                 show_message("Tree Planted!")
-                                 placed = True
-                             else:
-                                 show_message("Spot Occupied")
+                                show_message("Spot Occupied!")
 
-                    # Restore if not placed (cancel drag)
                     if not placed:
-                        # Put back everything
                         if dragging_source_tile:
                             # Map -> Map (Cancel)
                             sx, sy = dragging_source_tile
                             tile_to_restore = level_map[sy][sx]
-                            # Restore FULL amount (we removed it all)
-                            tile_to_restore.structure = dragging_item
-                            tile_to_restore.amount = dragging_max_amount 
+                            # Restaura o bloco na sua altura original
+                            tile_to_restore.add_structure(dragging_item, 1, dragging_base_amount)
                             show_message("Cancelled")
                         elif dragging_source_inv_item:
                             # Inventory -> Inventory (Cancel)
-                            # We didn't deduct yet, so just do nothing.
                             pass
-                    
-                    # Handle Remainder on Map if we placed specific amount from map?
-                    # If we placed 'dragging_amount' on map, and 'dragging_amount' < 'dragging_max_amount' (split from map)
-                    # We need to restore remainder to source tile
-                    if placed and dragging_source_tile and dragging_amount < dragging_max_amount:
-                         sx, sy = dragging_source_tile
-                         tile_to_restore = level_map[sy][sx]
-                         tile_to_restore.structure = dragging_item # It was cleared
-                         tile_to_restore.amount = dragging_max_amount - dragging_amount
                     
                     dragging_item = None
                     dragging_source_tile = None
@@ -1766,29 +1746,33 @@ def main():
                 stamina_timer = current_time
 
         if not is_resting and (dx != 0 or dy != 0) and (current_time - last_move_time > current_move_delay):
-            new_x = player_x + dx
-            new_y = player_y + dy
-            if (0 <= new_y < len(level_map)) and (0 <= new_x < len(level_map[0])):
-                target_tile = level_map[new_y][new_x]
+            target_x = player_x + dx
+            target_y = player_y + dy
+            if (0 <= target_y < len(level_map)) and (0 <= target_x < len(level_map[0])):
+                target_tile = level_map[target_y][target_x]
                 
-                # Checagem de Colisão 3D (Posição + Altura)
+                # Checagem de Colisão 3D (Posição + Altura em múltiplas pilhas)
                 char_h = 25
                 is_blocked_3d = False
                 
-                if target_tile.structure == 'Wall':
-                    w_bot = target_tile.base_amount * 30
-                    w_top = (target_tile.base_amount + target_tile.amount) * 30
-                    # Bloqueia se houver sobreposição vertical
-                    if (z_offset < w_top) and (z_offset + char_h > w_bot):
-                        is_blocked_3d = True
-                elif target_tile.structure == 'Tree':
-                    # Árvores bloqueiam do 0 ao 60
-                    if z_offset < 60:
-                        is_blocked_3d = True
-                elif target_tile.structure == 'Clay':
-                    c_top = (target_tile.base_amount + target_tile.amount) * 5
-                    if z_offset < c_top:
-                        is_blocked_3d = True
+                for p in target_tile.piles:
+                    if p['structure'] == 'Wall':
+                        w_bot = p['base_amount'] * 30
+                        w_top = (p['base_amount'] + p['amount']) * 30
+                        if (z_offset < w_top) and (z_offset + char_h > w_bot):
+                            is_blocked_3d = True
+                            break
+                    elif p['structure'] == 'Tree':
+                        t_bot = p['base_amount'] * 30
+                        if (z_offset < t_bot + 60) and (z_offset + char_h > t_bot):
+                            is_blocked_3d = True
+                            break
+                    elif p['structure'] == 'Clay':
+                        c_bot = p['base_amount'] * 5
+                        c_top = (p['base_amount'] + p['amount']) * 5
+                        if (z_offset < c_top) and (z_offset + char_h > c_bot):
+                            is_blocked_3d = True
+                            break
                 
                 # Permite entrar se não estiver bloqueado 3D e o terreno for válido
                 can_move = not is_blocked_3d
@@ -1796,7 +1780,26 @@ def main():
                     can_move = False # Água ainda bloqueia no nível do chão
                 
                 if can_move:
-                    player_x, player_y = new_x, new_y
+                    # --- Kicking Logic (Chutar Log) ---
+                    # Encontra logs na base que podem ser chutados
+                    log_pile = next((p for p in target_tile.piles if p['structure'] == 'Log' and p['base_amount'] == 0), None)
+                    if log_pile:
+                        # Tenta empurrar na mesma direção do movimento
+                        kx, ky = target_x + dx, target_y + dy
+                        if 0 <= ky < len(level_map) and 0 <= kx < len(level_map[0]):
+                            k_tile = level_map[ky][kx]
+                            if k_tile.is_walkable():
+                                k_tile.add_structure('Log', log_pile['amount'], 0)
+                                target_tile.piles.remove(log_pile)
+                                # Agora o tile está livre para caminhar?
+                                can_move = target_tile.is_walkable()
+                            else:
+                                can_move = False # Bloqueado pelo log que não pode ser chutado
+                        else:
+                            can_move = False # Borda do mapa
+
+                if can_move:
+                    player_x, player_y = target_x, target_y
                     last_move_time = current_time
 
             # --- Física de Pulo e Gravidade (Executada APÓS o movimento para evitar lag de 1 frame) ---
@@ -1935,73 +1938,75 @@ def main():
                     color = COLORS.get(g_type, (0,0,0))
                     pygame.draw.polygon(screen, color, points)
 
-                # Draw Structure
-                if tile.structure:
-                    if tile.structure == 'Tree':
+                # --- Draw Growth Stages for Tree Spawners ---
+                if tile.structure is None:
+                    spawner = next((r for r in respawning_resources if r['x'] == col_index and r['y'] == row_index), None)
+                    if spawner and spawner['structure'] == 'Tree' and tree_growth_imgs:
+                        # Calcula o estágio atual baseado no tempo restante
+                        # elapsed = delay - (target - now)
+                        delay = spawner['respawn_delay']
+                        target = spawner['respawn_time']
+                        elapsed = max(0, delay - (target - now))
+                        # 5 estágios: 0, 1, 2, 3, 4
+                        stage = int(min(4, (elapsed / delay) * 5))
+                        if stage < len(tree_growth_imgs):
+                            screen.blit(tree_growth_imgs[stage], (draw_x - 30, draw_y - 60))
+
+                # Draw Structures (Iterate over all piles in tile)
+                for p in tile.piles:
+                    p_type = p.get('structure')
+                    p_amt = p.get('amount', 1)
+                    p_base = p.get('base_amount', 0)
+                    
+                    if p_type == 'Tree':
                         if tree_img:
-                            # Posicionar o pé da árvore no centro do tile
-                            screen.blit(tree_img, (draw_x - 30, draw_y - 60))
+                            screen.blit(tree_img, (draw_x - 30, draw_y - 60 - (p_base * 30)))
                         else:
-                             # Fallback
-                             pygame.draw.rect(screen, (101, 67, 33), (draw_x - 5, draw_y - 10, 10, 25)) # Trunk
-                             pygame.draw.circle(screen, COLORS['F'], (int(draw_x), int(draw_y - 15)), 20) # Leaves
-                    elif tile.structure == 'Clay':
+                             pygame.draw.rect(screen, (101, 67, 33), (draw_x - 5, draw_y - 10 - (p_base * 30), 10, 25)) 
+                             pygame.draw.circle(screen, COLORS['F'], (int(draw_x), int(draw_y - 15 - (p_base * 30))), 20)
+                    elif p_type == 'Clay':
                         if clay_img:
-                            # Desenhar como pilha física (stack visual)
-                            # Limitar visualmente para não explodir a tela (max 5 ou 10 camadas visuais)
                             visual_limit = 5
-                            iters = min(tile.amount, visual_limit)
-                            
+                            iters = min(p_amt, visual_limit)
                             base_x = draw_x - 20
-                            base_y = draw_y - 5
-                            offset_per_item = 5 # Pixels para cima por item
-                            
+                            base_y = draw_y - 5 - (p_base * 5)
+                            offset_per_item = 5
                             for i in range(iters):
-                                # Cada item sobe um pouco
-                                # Desenhar de baixo pra cima? Ou cima pra baixo? 
-                                # A ordem padrão do loop é 0, 1, 2...
-                                # Se desenharmos no mesmo X, Y - (i * offset), o último desenhado fica "na frente/em cima".
-                                
-                                # Se tivermos MUITOS (> visual_limit), o último ícone pode ter um indicador?
-                                # O usuário pediu "empilhável", vou desenhar um em cima do outro.
                                 draw_pos_y = base_y - (i * offset_per_item)
                                 screen.blit(clay_img, (base_x, draw_pos_y))
-                            
-                            # Se a quantidade for muito grande, talvez ainda mostrar o número no topo?
-                            # O usuário disse "não stackável" (implicando não mostrar número?), mas se tiver 100 itens vai ficar bizarro.
-                            # Vou mostrar o número SÓ se passar do limite visual, ou se o usuário quiser saber a conta exata.
-                            # Mas "empilhável e não stackável" sugere fortemente o aspecto visual.
-                            # Vou deixar o número apenas se exceder o limite visual para indicar "+".
-                            if tile.amount > visual_limit:
-                                txt_amt = font.render(f"+{tile.amount - visual_limit}", True, (255, 255, 255))
-                                screen.blit(txt_amt, (draw_x, draw_y - (visual_limit * offset_per_item) - 15))
-                                
+                            if p_amt > visual_limit:
+                                txt_amt = font.render(f"+{p_amt - visual_limit}", True, (255, 255, 255))
+                                screen.blit(txt_amt, (draw_x, base_y - (visual_limit * offset_per_item) - 15))
                         else:
-                            pygame.draw.circle(screen, COLORS['R'], (int(draw_x), int(draw_y + 10)), 12)
-                            if tile.amount > 1:
-                                txt_amt = font.render(str(tile.amount), True, (255, 255, 255))
-                                screen.blit(txt_amt, (draw_x, draw_y))
-                                
-                    elif tile.structure == 'Wall':
-                        if clay_wall_img:
-                            # Empilhável
-                            base_x = draw_x - 30
-                            base_y = draw_y - 30 # Ajuste para centralizar no tile
-                            stack_offset_y = 30 # Altura de cada bloco
+                            pygame.draw.circle(screen, COLORS['R'], (int(draw_x), int(draw_y + 10 - (p_base * 5))), 12)
+                    elif p_type == 'Log':
+                        if log_img:
+                            # Centraliza perfeitamente no tile (60x30)
+                            # Log (45x30)
+                            base_x = draw_x - 22
+                            base_y = draw_y + 2 - (p_base * 8)
                             
-                            for i in range(tile.base_amount, tile.base_amount + tile.amount):
+                            if p_amt > 1 and log_stack_img:
+                                # Pilha (50x40)
+                                screen.blit(log_stack_img, (draw_x - 25, draw_y - 10 - (p_base * 8)))
+                                if p_amt > 2:
+                                    txt_amt = font.render(f"x{p_amt}", True, (255, 255, 255))
+                                    screen.blit(txt_amt, (draw_x, draw_y - 25 - (p_base * 8)))
+                            else:
+                                screen.blit(log_img, (base_x, base_y))
+                        else:
+                            pygame.draw.rect(screen, (139, 69, 19), (draw_x - 10, draw_y - 5 - (p_base * 10), 20, 10))
+                    elif p_type == 'Wall':
+                        if clay_wall_img:
+                            base_x = draw_x - 30
+                            base_y = draw_y - 30 
+                            stack_offset_y = 30
+                            for i in range(p_base, p_base + p_amt):
                                 screen.blit(clay_wall_img, (base_x, base_y - (i * stack_offset_y)))
                         else:
-                            # Simple Wall Block Fallback
-                            wall_color = COLORS['WALL']
-                            # Top Face (Shifted Up)
-                            top_points = [
-                                (draw_x, draw_y - 20),
-                                (draw_x + TILE_SIZE, draw_y + TILE_SIZE/2 - 20),
-                                (draw_x, draw_y + TILE_SIZE - 20),
-                                (draw_x - TILE_SIZE, draw_y + TILE_SIZE/2 - 20)
-                            ]
-                            pygame.draw.polygon(screen, wall_color, top_points)
+                            wall_color = COLORS['Wall']
+                            # Simple fallback for floating walls
+                            pygame.draw.rect(screen, wall_color, (draw_x - 15, draw_y - 15 - (p_base * 30), 30, 30))
 
                 # --- DESENHO DO GATO (DENTRO DO LOOP PARA SORTING) ---
                 if game_mode == "PLAY" and col_index == player_x and row_index == player_y:
@@ -2022,34 +2027,6 @@ def main():
                     elif current_time - chat_timer >= CHAT_DURATION:
                         chat_message = "" # Limpa mensagem antiga
 
-        # --- Mouse cursor "Ghost" Clay (Legacy R-Mode) ---
-        if placing_rock_mode and clay_img and not dragging_item:
-            # Snap to grid logic
-            # Use 'hover_grid_x' calculated above
-            
-            # Recalculate screen pos for the ghost
-            ghost_iso_x, ghost_iso_y = cart_to_iso(hover_grid_x, hover_grid_y)
-            ghost_draw_x = ghost_iso_x + offset_x
-            ghost_draw_y = ghost_iso_y + offset_y
-            
-            # Distance/Validity Check for Color
-            dist_x = abs(hover_grid_x - player_x)
-            dist_y = abs(hover_grid_y - player_y)
-            valid_pos = (dist_x <= 2 and dist_y <= 2) and (0 <= hover_grid_y < len(level_map) and 0 <= hover_grid_x < len(level_map[0]))
-            
-            if valid_pos:
-                 target_t = level_map[hover_grid_y][hover_grid_x]
-                 if target_t.structure is not None:
-                     valid_pos = False
-
-            # Create a ghost surface
-            ghost_surf = clay_img.copy()
-            if valid_pos:
-                ghost_surf.fill((100, 255, 100, 150), special_flags=pygame.BLEND_RGBA_MULT) # Greenish tint
-            else:
-                ghost_surf.fill((255, 100, 100, 150), special_flags=pygame.BLEND_RGBA_MULT) # Reddish tint
-            
-            screen.blit(ghost_surf, (ghost_draw_x - 20, ghost_draw_y - 5))
 
         if game_mode == "EDITOR":
             # Desenha ícones flutuantes sobre os spawners para o editor ver
@@ -2202,7 +2179,10 @@ def main():
                          iy = inv_box_y + item.get('y', 0)
                          item_name = item['name']
 
-                         if item_name == 'Wood' and tree_img:
+                         if item_name == 'Log' and log_img:
+                             icon = pygame.transform.scale(log_img, (40, 28))
+                             screen.blit(icon, (ix, iy))
+                         elif item_name == 'Wood' and tree_img:
                              icon = pygame.transform.scale(tree_img, (30, 45))
                              screen.blit(icon, (ix, iy))
                          elif item_name == 'Clay' and clay_img:
@@ -2257,6 +2237,8 @@ def main():
                              color = COLORS['F']
                          elif tile.structure == 'Wall': 
                              color = COLORS['WALL']
+                         elif tile.structure == 'Log':
+                             color = (139, 69, 19) # Brown
                              
                          pygame.draw.rect(screen, color, 
                                           (minimap_x + c * minimap_tile_size, 
@@ -2268,7 +2250,12 @@ def main():
                      # player_x, player_y are grid coordinates
                      mp_player_x = minimap_x + (player_x * minimap_tile_size)
                      mp_player_y = minimap_y + (player_y * minimap_tile_size)
-                     pygame.draw.circle(screen, (255, 0, 0), (int(mp_player_x), int(mp_player_y)), 3)
+                     if cat_minimap_icon:
+                         screen.blit(cat_minimap_icon, 
+                                     (int(mp_player_x) - cat_minimap_icon.get_width() // 2, 
+                                      int(mp_player_y) - cat_minimap_icon.get_height() // 2))
+                     else:
+                         pygame.draw.circle(screen, (255, 0, 0), (int(mp_player_x), int(mp_player_y)), 3)
              else:
                  # Minimap is minimized -> Draw the Icon
                  icon_size = 64
@@ -2310,6 +2297,8 @@ def main():
                 icon_to_draw = clay_img
             elif dragging_item == 'Wood' and tree_img:
                 icon_to_draw = tree_img
+            elif dragging_item == 'Log' and log_img:
+                icon_to_draw = log_img
             elif dragging_item == 'Wall' and clay_wall_img:
                 icon_to_draw = clay_wall_img
                 
@@ -2376,45 +2365,20 @@ def main():
                 elif dragging_item == 'Wall':
                      ghost_surf = pygame.transform.scale(ghost_surf, (60, 60))
                      offset_ghost_y = 30
+                     # Preview Height
+                     p_base = dragging_base_amount
+                     if dragging_source_tile is None:
+                         p_base = int(z_offset // 30)
                      
-                     # Preview Smart Snap Height
-                     preview_base = dragging_base_amount # Tenta preservar altura original
-                     found_gn = False
-                     
-                     # Prioridade 1: Se o próprio tile alvo já tem uma parede, o preview deve aparecer no topo dela (stacking)
-                     if target_t.structure == 'Wall':
-                         preview_base = target_t.base_amount + target_t.amount
-                         found_gn = True
-                     
-                     # Prioridade 2: Procura vizinhos para snap se não estiver stackando
-                     if not found_gn:
-                         g_neighbors = [(g_gx+1, g_gy), (g_gx-1, g_gy), (g_gx, g_gy+1), (g_gx, g_gy-1)]
-                         for nx, ny in g_neighbors:
-                             if 0 <= ny < len(level_map) and 0 <= nx < len(level_map[0]):
-                                 ntile = level_map[ny][nx]
-                                 if ntile.structure == 'Wall':
-                                     preview_base = ntile.base_amount
-                                     found_gn = True
-                                     break
-                     
-                     if not found_gn:
-                         # Procura diagonal/raio 1 para ser amigável no preview
-                         for dy in [-1, 0, 1]:
-                            for dx in [-1, 0, 1]:
-                                if dx == 0 and dy == 0: continue
-                                nx, ny = g_gx + dx, g_gy + dy
-                                if 0 <= ny < len(level_map) and 0 <= nx < len(level_map[0]):
-                                    ntile = level_map[ny][nx]
-                                    if ntile.structure == 'Wall':
-                                        preview_base = ntile.base_amount
-                                        found_gn = True
-                                        break
-                            if found_gn: break
-
-                     if not found_gn and dragging_source_tile is None:
-                         # Se veio do inventário e não tem vizinho, usa altura do player
-                         preview_base = int(z_offset // 30)
-                         
+                     # Ajuste visual: se já existir uma parede nessa altura, o preview sobe (stacking simulado)
+                     # add_structure faz isso internamente, então o preview deve mostrar o resultado final.
+                     temp_base = p_base
+                     for p in target_t.piles:
+                         if p['structure'] == 'Wall':
+                             # Se o novo bloco encosta no topo desta pilha, ele vai para cima
+                             if p['base_amount'] <= temp_base < p['base_amount'] + p['amount']:
+                                 temp_base = p['base_amount'] + p['amount']
+                     preview_base = temp_base
                      ghost_z_offset = preview_base * 30
                 else: # Clay
                      ghost_surf = pygame.transform.scale(ghost_surf, (40, 40))
