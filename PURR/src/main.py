@@ -130,11 +130,15 @@ def get_tile_height(tile):
     for p in tile.piles:
         h = 0
         if p['structure'] == 'Clay':
-            h = (p['base_amount'] * 5) + (p['amount'] * 5)
+            stage = p.get('stage', 0)
+            if stage < 2:
+                h = (p['base_amount'] * 30) + 60
+            else:
+                h = (p['base_amount'] * 30) + 10 # Pilha é baixa
         elif p['structure'] == 'Wall':
             h = (p['base_amount'] * 30) + (p['amount'] * 30)
         elif p['structure'] == 'Tree':
-            h = (p['base_amount'] * 30) + 60
+            h = (p['base_amount'] * 30) + 90 # Increased height for collision box
         if h > max_h: max_h = h
     return max_h
 
@@ -468,13 +472,29 @@ def main():
         except Exception as e:
             print(f"Aviso: WaterStoped.png erro: {e}")
 
-        # Carregar Argila
+        # Carregar Argila (Breakable Ore)
+        clay_stages = []
         try:
-            clay_full = load_env_sprite(['assets', 'environment', 'Ore1.png'])
-            clay_img = pygame.transform.scale(clay_full, (40, 40)) 
-            print("Ore1.png carregado.")
+            ore_full = load_env_sprite(['assets', 'environment', 'Ore.png'])
+            w, h = ore_full.get_size()
+            sw = w // 3
+            for i in range(3):
+                crop_rect = pygame.Rect(i * sw, 0, sw, h)
+                stage_img = ore_full.subsurface(crop_rect)
+                # Redimensiona para um tamanho compatível
+                stage_resized = pygame.transform.scale(stage_img, (70, 50))
+                clay_stages.append(stage_resized)
+            clay_img = clay_stages[2] # Ícone do inventário
+            print("Ore.png carregado com 3 estágios.")
         except Exception as e:
-            print(f"Erro ao carregar argila: {e}")
+            print(f"Erro ao carregar Ore.png: {e}")
+            # Fallback
+            try:
+                clay_full = load_env_sprite(['assets', 'environment', 'Ore1.png'])
+                clay_img = pygame.transform.scale(clay_full, (40, 40)) 
+                clay_stages = [clay_img, clay_img, clay_img]
+            except:
+                pass
 
         # Carregar Wall
         try:
@@ -489,13 +509,17 @@ def main():
         try:
             # tree1.png é a árvore padrão madura
             tree_full = load_env_sprite(['assets', 'environment', 'tree4.png'])
-            tree_img = pygame.transform.scale(tree_full, (60, 80))
+            tree_img = pygame.transform.scale(tree_full, (80, 110))
             
             for i in range(5):
                 t_path = os.path.join(base_dir, 'assets', 'environment', f'tree{i}.png')
                 if os.path.exists(t_path):
                     img = pygame.image.load(t_path).convert_alpha()
-                    img = pygame.transform.scale(img, (60, 80))
+                    # Escalonamento progressivo
+                    sw = 20 + i * 15
+                    sh = 30 + i * 20
+                    if i == 4: sw, sh = 80, 110
+                    img = pygame.transform.scale(img, (sw, sh))
                     tree_growth_imgs.append(img)
                 else:
                     tree_growth_imgs.append(tree_img)
@@ -507,7 +531,7 @@ def main():
         # Carregar Log
         try:
             log_full = load_env_sprite(['assets', 'environment', 'Log.png'])
-            log_img = pygame.transform.scale(log_full, (45, 30))
+            log_img = pygame.transform.scale(log_full, (60, 40))
             print("Log.png carregado.")
             
             log_stack_full = load_env_sprite(['assets', 'environment', 'LogStack.png'])
@@ -659,7 +683,8 @@ def main():
                 if not found_base_wall:
                     tile.add_structure("Wall", 1, 0)
             elif selection == "Clay":
-                tile.add_structure("Clay", 10, 0)
+                tile.add_structure("Clay", 1, 0)
+                if tile.piles: tile.piles[-1]['stage'] = 0
             else:
                 if selection is not None:
                     tile.add_structure(selection, 1, 0)
@@ -690,7 +715,9 @@ def main():
                      'respawn_delay': editor_spawner_delay
                  })
                  tile.structure = selection 
-                 if selection == "Clay": tile.amount = 10
+                 if selection == "Clay": 
+                     tile.amount = 1
+                     if tile.piles: tile.piles[0]['stage'] = 0
              else:
                  tile.structure = None 
         
@@ -863,12 +890,18 @@ def main():
                         # Se já passou do tempo de respawn, vira árvore colhível (Stage 4)
                         if now >= res.get('respawn_time', 0):
                             tile.add_structure('Tree', 1, 0)
+                            # Reset mesmo se falhar (evita loop infinito de tentativa se bloqueado)
+                            res['respawn_time'] = time.time() + res.get('respawn_delay', 120)
                 else:
                     # Outros recursos (Clay) spawnão instantaneamente no final do timer
                     if now >= res.get('respawn_time', 0):
+                        # Reset mesmo se falhar
+                        res['respawn_time'] = time.time() + res.get('respawn_delay', 120)
                         if tile.structure is None:
                             tile.structure = res['structure']
-                            if tile.structure == 'Clay': tile.amount = 10
+                            if tile.structure == 'Clay': 
+                                tile.amount = 1
+                                if tile.piles: tile.piles[0]['stage'] = 0
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -989,8 +1022,23 @@ def main():
                                 level_map[drop_y][drop_x].add_structure('Log', 1, 0)
                                 show_message("Tree harvested! Log dropped.")
                             elif p_type == 'Clay':
-                                inv_add(inventory, 'Clay', p_amt)
-                                show_message(f"Clay +{p_amt}")
+                                stage = pile.get('stage', 0)
+                                if stage < 2:
+                                    # Quebrar a pedra
+                                    pile['stage'] = stage + 1
+                                    if pile['stage'] == 2:
+                                        pile['amount'] = 10 # Quantidade de recurso
+                                    
+                                    # Se quebrou, reinicia o spawner agora
+                                    if pile['stage'] == 2 and spw and spw['structure'] == p_type:
+                                        spw['respawn_time'] = time.time() + spw.get('respawn_delay', 120)
+                                    
+                                    target_tile.piles.append(pile) # Devolve para o mapa
+                                    show_message("Clay damaged!" if stage == 0 else "Clay broken!")
+                                else:
+                                    # Coletar recurso stackável
+                                    inv_add(inventory, 'Clay', p_amt)
+                                    show_message(f"Clay +{p_amt}")
                             
                             harvested = True
                             target_tile.piles.sort(key=lambda x: x['base_amount'])
@@ -1076,23 +1124,27 @@ def main():
                         show_message(f"Floor Adjusted: H{dragging_base_amount}")
                     else:
                         # Adjust dragging amount (Clay, etc)
-                        step = 1
-                        # Support for fast adjusting with modifiers
-                        mods = pygame.key.get_mods()
-                        if mods & pygame.KMOD_SHIFT:
-                            step = 10
-                        if mods & pygame.KMOD_CTRL:
-                            step = 100
+                        # Only allow if it came from inventory, or if we implement dynamic map removal
+                        if dragging_source_tile is None:
+                            step = 1
+                            # Support for fast adjusting with modifiers
+                            mods = pygame.key.get_mods()
+                            if mods & pygame.KMOD_SHIFT:
+                                step = 10
+                            if mods & pygame.KMOD_CTRL:
+                                step = 100
+                                
+                            dragging_amount += event.y * step
                             
-                        dragging_amount += event.y * step
-                        
-                        # Clamp between 1 and the maximum available from source
-                        if dragging_amount < 1: 
-                            dragging_amount = 1
-                        if dragging_amount > dragging_max_amount:
-                            dragging_amount = dragging_max_amount
-                        
-                        show_message(f"Amount: {dragging_amount} / {dragging_max_amount}")
+                            # Clamp between 1 and the maximum available from source
+                            if dragging_amount < 1: 
+                                dragging_amount = 1
+                            if dragging_amount > dragging_max_amount:
+                                dragging_amount = dragging_max_amount
+                            
+                            show_message(f"Amount: {dragging_amount} / {dragging_max_amount}")
+                        else:
+                            show_message("Cannot change amount of items picked from the map")
 
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = pygame.mouse.get_pos()
@@ -1221,7 +1273,15 @@ def main():
                         dist_x = abs(grid_x - player_x)
                         dist_y = abs(grid_y - player_y)
                         
-                        if dist_x <= 5 and dist_y <= 5: # Aumentado para 5 para alcançar construções distantes
+                        if dist_x <= 5 and dist_y <= 5:
+                            if is_double_click and dragging_item:
+                                item_to_add = dragging_item
+                                if dragging_item == 'Tree': item_to_add = 'Log'
+                                inv_add(inventory, item_to_add, dragging_amount)
+                                show_message(f'Collected {item_to_add}')
+                                dragging_item = None
+                                dragging_amount = 0
+                                continue # Aumentado para 5 para alcançar construções distantes
                             # --- Height-Aware Picking for Selecting Items ---
                             best_p = -1
                             found_pick = False
@@ -1233,7 +1293,13 @@ def main():
                                         ix, iy = cart_to_iso(rx, ry)
                                         dx, dy = ix + offset_x, iy + offset_y
                                         
-                                        h_unit = 30 if p['structure'] == 'Wall' else (5 if p['structure'] == 'Clay' else 60)
+                                        if p['structure'] == 'Wall': h_unit = 30
+                                        elif p['structure'] == 'Log': h_unit = 5
+                                        elif p['structure'] == 'Clay':
+                                            h_unit = 10 if p.get('stage', 0) == 2 else 60
+                                        elif p['structure'] == 'Log':
+                                            h_unit = 15
+                                        else: h_unit = 60
                                         h_val = p['amount'] * h_unit
                                         b_val = p['base_amount'] * h_unit
                                         
@@ -1255,7 +1321,12 @@ def main():
                                 # Usa a pilha específica identificada no clique
                                 pile = tile.piles[target_pile_idx]
                                 
-                                dragging_item = pile['structure']
+                                # Bloqueia movimentação de Clay sólido (Stage 0 ou 1)
+                                if pile['structure'] == 'Clay' and pile.get('stage', 0) < 2:
+                                    show_message("Solid Clay cannot be moved!")
+                                    found_pick = False
+                                else:
+                                    dragging_item = pile['structure']
                                 dragging_source_tile = (grid_x, grid_y)
                                 dragging_source_inv_item = None
                                 dragging_amount = 1
@@ -1396,13 +1467,7 @@ def main():
                                     # From Map: Add new item
                                     inventory.append({'name': dragging_item, 'count': final_qty, 'x': rel_x, 'y': rel_y})
                                     
-                                    # If we split from map (took less than max), we need to put remainder back on map?
-                                    if dragging_source_tile and final_qty < dragging_max_amount:
-                                        leftover = dragging_max_amount - final_qty
-                                        sx, sy = dragging_source_tile
-                                        t = level_map[sy][sx]
-                                        t.structure = dragging_item 
-                                        t.amount = leftover
+
 
                             show_message(f"Moved {final_qty} {dragging_item}")
                             
@@ -1500,14 +1565,18 @@ def main():
                         if dragging_source_tile:
                             sx, sy = dragging_source_tile
                             tile_to_restore = level_map[sy][sx]
-                            tile_to_restore.structure = dragging_item
-                            tile_to_restore.amount = dragging_max_amount
+                            # Restaura exatamente 1 bloco na sua altura original
+                            tile_to_restore.add_structure(dragging_item, 1, dragging_base_amount)
                         
                         dragging_item = None
                         dragging_source_tile = None
                         dragging_source_inv_item = None
                         dragging_amount = 0
                         show_message("Drag Cancelled")
+
+                if event.key == pygame.K_k: # Clear Inventory (Debug/Cleanup)
+                    inventory = []
+                    show_message("Inventory Cleared!")
 
                 if event.key == pygame.K_c: # Toggle Rest
                     is_resting = not is_resting
@@ -1764,16 +1833,24 @@ def main():
                             break
                     elif p['structure'] == 'Tree':
                         t_bot = p['base_amount'] * 30
-                        if (z_offset < t_bot + 60) and (z_offset + char_h > t_bot):
+                        if (z_offset < t_bot + 90) and (z_offset + char_h > t_bot):
                             is_blocked_3d = True
                             break
                     elif p['structure'] == 'Clay':
-                        c_bot = p['base_amount'] * 5
-                        c_top = (p['base_amount'] + p['amount']) * 5
+                        c_bot = p['base_amount'] * 30
+                        c_top = c_bot + (60 if p.get('stage', 0) < 2 else 10)
                         if (z_offset < c_top) and (z_offset + char_h > c_bot):
                             is_blocked_3d = True
                             break
+                    # Logs (item/resource) não bloqueiam movimento no 3D
                 
+                # --- Spawner Collision Check ---
+                spw = next((r for r in respawning_resources if r['x'] == target_x and r['y'] == target_y), None)
+                if spw and spw['structure'] == 'Tree':
+                    elapsed = max(0, spw['respawn_delay'] - (spw['respawn_time'] - time.time()))
+                    stage = int(min(4, (elapsed / spw['respawn_delay']) * 5))
+                    if stage >= 2 and z_offset < 60: # Bloqueia se já cresceu um pouco
+                        is_blocked_3d = True
                 # Permite entrar se não estiver bloqueado 3D e o terreno for válido
                 can_move = not is_blocked_3d
                 if target_tile.ground_type == 'W' and z_offset <= 0:
@@ -1782,7 +1859,14 @@ def main():
                 if can_move:
                     # --- Kicking Logic (Chutar Log) ---
                     # Encontra logs na base que podem ser chutados
-                    log_pile = next((p for p in target_tile.piles if p['structure'] == 'Log' and p['base_amount'] == 0), None)
+                    log_idx = -1
+                    log_pile = None
+                    for i, p in enumerate(target_tile.piles):
+                        if p['structure'] == 'Log' and p['base_amount'] == 0:
+                            log_idx = i
+                            log_pile = p
+                            break
+                            
                     if log_pile:
                         # Tenta empurrar na mesma direção do movimento
                         kx, ky = target_x + dx, target_y + dy
@@ -1790,7 +1874,7 @@ def main():
                             k_tile = level_map[ky][kx]
                             if k_tile.is_walkable():
                                 k_tile.add_structure('Log', log_pile['amount'], 0)
-                                target_tile.piles.remove(log_pile)
+                                target_tile.piles.pop(log_idx)
                                 # Agora o tile está livre para caminhar?
                                 can_move = target_tile.is_walkable()
                             else:
@@ -1814,7 +1898,12 @@ def main():
                 possible_floors.append((current_tile_obj.base_amount + current_tile_obj.amount) * 30)
                 ceilings.append(current_tile_obj.base_amount * 30)
             elif current_tile_obj.structure == 'Clay':
-                possible_floors.append((current_tile_obj.base_amount + current_tile_obj.amount) * 5)
+                # Check stage for collision height
+                clay_p = next((p for p in current_tile_obj.piles if p['structure'] == 'Clay'), None)
+                if clay_p and clay_p.get('stage', 0) < 2:
+                    possible_floors.append((current_tile_obj.base_amount * 30) + 60)
+                else:
+                    possible_floors.append((current_tile_obj.base_amount * 30) + 10)
 
             # Ground level: maior suporte abaixo ou no nível atual
             ground_level = 0
@@ -1950,7 +2039,8 @@ def main():
                         # 5 estágios: 0, 1, 2, 3, 4
                         stage = int(min(4, (elapsed / delay) * 5))
                         if stage < len(tree_growth_imgs):
-                            screen.blit(tree_growth_imgs[stage], (draw_x - 30, draw_y - 60))
+                            t_img = tree_growth_imgs[stage]
+                            screen.blit(t_img, (draw_x - (t_img.get_width()//2), draw_y + 20 - t_img.get_height()))
 
                 # Draw Structures (Iterate over all piles in tile)
                 for p in tile.piles:
@@ -1960,38 +2050,40 @@ def main():
                     
                     if p_type == 'Tree':
                         if tree_img:
-                            screen.blit(tree_img, (draw_x - 30, draw_y - 60 - (p_base * 30)))
+                            screen.blit(tree_img, (draw_x - 40, draw_y - 80 - (p_base * 30)))
                         else:
                              pygame.draw.rect(screen, (101, 67, 33), (draw_x - 5, draw_y - 10 - (p_base * 30), 10, 25)) 
                              pygame.draw.circle(screen, COLORS['F'], (int(draw_x), int(draw_y - 15 - (p_base * 30))), 20)
                     elif p_type == 'Clay':
-                        if clay_img:
-                            visual_limit = 5
-                            iters = min(p_amt, visual_limit)
-                            base_x = draw_x - 20
-                            base_y = draw_y - 5 - (p_base * 5)
-                            offset_per_item = 5
-                            for i in range(iters):
-                                draw_pos_y = base_y - (i * offset_per_item)
-                                screen.blit(clay_img, (base_x, draw_pos_y))
-                            if p_amt > visual_limit:
-                                txt_amt = font.render(f"+{p_amt - visual_limit}", True, (255, 255, 255))
-                                screen.blit(txt_amt, (draw_x, base_y - (visual_limit * offset_per_item) - 15))
+                        stage = p.get('stage', 0)
+                        if clay_stages and stage < len(clay_stages):
+                            img = clay_stages[stage]
+                            if stage < 2:
+                                # Desenha o bloco sólido (Stage 0 ou 1)
+                                screen.blit(img, (draw_x - 35, draw_y - 20 - (p_base * 30)))
+                            else:
+                                # Desenha o recurso coletável (Stage 2) - Stackable visual
+                                visual_limit = 5
+                                iters = min(p_amt, visual_limit)
+                                for i in range(iters):
+                                    screen.blit(img, (draw_x - 35, draw_y - 15 - (p_base * 30) - (i * 2)))
+                                if p_amt > visual_limit:
+                                    txt_amt = font.render(f"x{p_amt}", True, (255, 255, 255))
+                                    screen.blit(txt_amt, (draw_x, draw_y - 30 - (p_base * 30)))
                         else:
-                            pygame.draw.circle(screen, COLORS['R'], (int(draw_x), int(draw_y + 10 - (p_base * 5))), 12)
+                            pygame.draw.circle(screen, COLORS['R'], (int(draw_x), int(draw_y + 10 - (p_base * 30))), 12)
                     elif p_type == 'Log':
                         if log_img:
-                            # Centraliza perfeitamente no tile (60x30)
-                            # Log (45x30)
-                            base_x = draw_x - 22
-                            base_y = draw_y + 2 - (p_base * 8)
+                            # Centraliza no tile (60x30)
+                            base_x = draw_x - 30
+                            base_y = draw_y - 15 - (p_base * 0) # Log sempre no H0
                             
                             if p_amt > 1 and log_stack_img:
                                 # Pilha (50x40)
-                                screen.blit(log_stack_img, (draw_x - 25, draw_y - 10 - (p_base * 8)))
+                                screen.blit(log_stack_img, (draw_x - 25, draw_y - 15 - (p_base * 0)))
                                 if p_amt > 2:
                                     txt_amt = font.render(f"x{p_amt}", True, (255, 255, 255))
-                                    screen.blit(txt_amt, (draw_x, draw_y - 25 - (p_base * 8)))
+                                    screen.blit(txt_amt, (draw_x, draw_y - 25 - (p_base * 0)))
                             else:
                                 screen.blit(log_img, (base_x, base_y))
                         else:
@@ -2180,7 +2272,10 @@ def main():
                          item_name = item['name']
 
                          if item_name == 'Log' and log_img:
-                             icon = pygame.transform.scale(log_img, (40, 28))
+                             if draw_count > 1 and log_stack_img:
+                                  icon = pygame.transform.scale(log_stack_img, (40, 32))
+                              else:
+                                  icon = pygame.transform.scale(log_img, (40, 28))
                              screen.blit(icon, (ix, iy))
                          elif item_name == 'Wood' and tree_img:
                              icon = pygame.transform.scale(tree_img, (30, 45))
@@ -2380,9 +2475,12 @@ def main():
                                  temp_base = p['base_amount'] + p['amount']
                      preview_base = temp_base
                      ghost_z_offset = preview_base * 30
+                elif dragging_item == 'Log':
+                     ghost_surf = pygame.transform.scale(ghost_surf, (60, 40))
+                     offset_ghost_y = 15
                 else: # Clay
                      ghost_surf = pygame.transform.scale(ghost_surf, (40, 40))
-                     offset_ghost_y = 5 
+                     offset_ghost_y = 25 
                 
                 ghost_surf.fill((100, 255, 100, 150), special_flags=pygame.BLEND_RGBA_MULT)
                 # Apply ghost_z_offset to the drawing position

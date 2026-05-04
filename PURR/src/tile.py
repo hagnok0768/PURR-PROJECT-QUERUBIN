@@ -47,29 +47,31 @@ class Tile:
         if self.ground_type == 'W':
             return False
         for p in self.piles:
-            if p['structure'] in ['Clay', 'Wall', 'Tree', 'Log'] and p['base_amount'] == 0:
+            # Logs na base H0 não bloqueiam movimento (podem ser chutados)
+            if p['structure'] in ['Clay', 'Wall', 'Tree'] and p['base_amount'] == 0:
                 return False
         return True
 
     def add_structure(self, structure, amount=1, base_amount=0):
         if amount <= 0: return False
         
+        # Logs sempre ficam no chão (H0)
+        if structure == 'Log':
+            base_amount = 0
+        
         # 1. Check for collisions with DIFFERENT structures
-        # (Não permite ocupar o mesmo espaço físico de outro tipo de objeto)
         for p in self.piles:
             if p['structure'] != structure:
                 p_top = p['base_amount'] + p['amount']
                 new_top = base_amount + amount
-                # Se os intervalos de altura se sobrepõem
                 if not (new_top <= p['base_amount'] or base_amount >= p_top):
-                    return False # Colisão!
+                    return False
         
         # 2. Adiciona o novo segmento
         self.piles.append({'structure': structure, 'amount': amount, 'base_amount': base_amount})
         self.piles.sort(key=lambda x: x['base_amount'])
         
         # 3. Consolidação (Merging)
-        # Junta segmentos do mesmo tipo que se tocam ou sobrepõem
         if not self.piles: return
         
         merged = []
@@ -77,13 +79,17 @@ class Tile:
         
         for i in range(1, len(self.piles)):
             nxt = self.piles[i]
-            # Se tocam/sobrepõem e são do mesmo tipo
             if (nxt['structure'] == current['structure'] and 
                 nxt['base_amount'] <= current['base_amount'] + current['amount']):
                 
-                new_top = max(current['base_amount'] + current['amount'], 
-                              nxt['base_amount'] + nxt['amount'])
-                current['amount'] = new_top - current['base_amount']
+                # Se for a mesma base, somamos as quantidades (stacking de itens)
+                if nxt['base_amount'] == current['base_amount']:
+                    current['amount'] += nxt['amount']
+                else:
+                    # Se sobrepõem em alturas diferentes, mesclamos o intervalo
+                    new_top = max(current['base_amount'] + current['amount'], 
+                                  nxt['base_amount'] + nxt['amount'])
+                    current['amount'] = new_top - current['base_amount']
             else:
                 merged.append(current)
                 current = nxt.copy()
